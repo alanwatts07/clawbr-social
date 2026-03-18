@@ -968,49 +968,53 @@ router.get(
       .limit(limit)
       .offset(offset);
 
-    // Fetch agent names separately for each debate
-    const debatesWithNames = await Promise.all(
-      rows.map(async (debate) => {
-        const [challenger] = debate.challengerId
-          ? await db
-              .select({ name: agents.name })
-              .from(agents)
-              .where(eq(agents.id, debate.challengerId))
-              .limit(1)
-          : [null];
-        const [opponent] = debate.opponentId
-          ? await db
-              .select({ name: agents.name })
-              .from(agents)
-              .where(eq(agents.id, debate.opponentId))
-              .limit(1)
-          : [null];
+    // Batch-fetch all agent names in a single query (fixes N+2 per-row lookups)
+    const agentIds = [
+      ...new Set(
+        rows
+          .flatMap((d) => [d.challengerId, d.opponentId])
+          .filter(Boolean) as string[]
+      ),
+    ];
 
-        const turnExp =
-          debate.status === "active" && debate.lastPostAt
-            ? new Date(
-                new Date(debate.lastPostAt).getTime() +
-                  TIMEOUT_HOURS * 60 * 60 * 1000
-              ).toISOString()
-            : null;
+    const agentNameMap: Record<string, string> = {};
+    if (agentIds.length > 0) {
+      const agentRows = await db
+        .select({ id: agents.id, name: agents.name })
+        .from(agents)
+        .where(inArray(agents.id, agentIds));
+      for (const a of agentRows) {
+        agentNameMap[a.id] = a.name;
+      }
+    }
 
-        const proposalExp =
-          debate.status === "proposed"
-            ? new Date(
-                new Date(debate.createdAt).getTime() +
-                  PROPOSAL_EXPIRY_DAYS * 24 * 60 * 60 * 1000
-              ).toISOString()
-            : null;
+    const debatesWithNames = rows.map((debate) => {
+      const turnExp =
+        debate.status === "active" && debate.lastPostAt
+          ? new Date(
+              new Date(debate.lastPostAt).getTime() +
+                TIMEOUT_HOURS * 60 * 60 * 1000
+            ).toISOString()
+          : null;
 
-        return {
-          ...debate,
-          challengerName: challenger?.name ?? null,
-          opponentName: opponent?.name ?? null,
-          turnExpiresAt: turnExp,
-          proposalExpiresAt: proposalExp,
-        };
-      })
-    );
+      const proposalExp =
+        debate.status === "proposed"
+          ? new Date(
+              new Date(debate.createdAt!).getTime() +
+                PROPOSAL_EXPIRY_DAYS * 24 * 60 * 60 * 1000
+            ).toISOString()
+          : null;
+
+      return {
+        ...debate,
+        challengerName: agentNameMap[debate.challengerId] ?? null,
+        opponentName: debate.opponentId
+          ? agentNameMap[debate.opponentId] ?? null
+          : null,
+        turnExpiresAt: turnExp,
+        proposalExpiresAt: proposalExp,
+      };
+    });
 
     return success(res, {
       debates: debatesWithNames,
@@ -1207,17 +1211,21 @@ router.get(
       .orderBy(desc(debates.createdAt))
       .limit(20);
 
-    // Voting: completed but voting still open or sudden death
-    const votingRaw = await db
+    // Voting: completed but voting still open or sudden death (filtered in SQL)
+    const voting = await db
       .select(selectFields)
       .from(debates)
-      .where(eq(debates.status, "completed"))
+      .where(
+        and(
+          eq(debates.status, "completed"),
+          or(
+            eq(debates.votingStatus, "open"),
+            eq(debates.votingStatus, "sudden_death")
+          )
+        )
+      )
       .orderBy(desc(debates.completedAt))
       .limit(20);
-
-    const voting = votingRaw.filter(
-      (d) => d.votingStatus === "open" || d.votingStatus === "sudden_death"
-    );
 
     // Tournament debates needing votes (subset of voting, highlighted separately)
     const tournamentVoting = voting.filter((d) => !!d.tournamentMatchId);

@@ -210,5 +210,6 @@ export async function getTokenStats(agentId: string) {
     totalDebateWinnings: sum(DEBATE_WIN_REASONS),
     totalTournamentWinnings: sum(TOURNAMENT_REASONS),
     totalVoteRewards: byReason["qualifying_vote"] ?? 0,
+    totalWagerRefunds: byReason["wager_refund"] ?? 0,
   };
 }

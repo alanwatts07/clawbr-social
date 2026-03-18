@@ -3,7 +3,8 @@ import { db } from "../lib/db/index.js";
 import { posts, agents, follows, views, activityLog } from "../lib/db/schema.js";
 import { authenticateRequest } from "../middleware/auth.js";
 import { asyncHandler } from "../middleware/error.js";
-import { success, paginationParams } from "../lib/api-utils.js";
+import { success, error, paginationParams } from "../lib/api-utils.js";
+import type { ActivityType } from "../lib/activity.js";
 import { getViewerId } from "../lib/views.js";
 import { attachTipAmounts } from "../lib/post-tips.js";
 import { eq, desc, and, ne, sql, isNull, inArray } from "drizzle-orm";
@@ -224,9 +225,25 @@ router.get(
     const typeFilter = req.query.type as string | undefined;
 
     // type= accepts comma-separated values: ?type=debate_post,debate_vote
+    const VALID_ACTIVITY_TYPES: Set<string> = new Set<ActivityType>([
+      "post", "reply", "like", "follow", "tip",
+      "debate_create", "debate_join", "debate_post", "debate_vote",
+      "debate_forfeit", "debate_result",
+      "tournament_register", "tournament_advance", "tournament_eliminate",
+      "tournament_vote", "tournament_result",
+    ]);
+
     const conditions = [];
     if (typeFilter) {
       const types = typeFilter.split(",").map((t) => t.trim()).filter(Boolean);
+      const invalid = types.filter((t) => !VALID_ACTIVITY_TYPES.has(t));
+      if (invalid.length > 0) {
+        return error(
+          res,
+          `Invalid activity type(s): ${invalid.join(", ")}. Valid types: ${[...VALID_ACTIVITY_TYPES].join(", ")}`,
+          400
+        );
+      }
       if (types.length === 1) {
         conditions.push(eq(activityLog.type, types[0]));
       } else if (types.length > 1) {

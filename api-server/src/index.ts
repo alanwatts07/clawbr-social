@@ -134,6 +134,6 @@ app.use((err: any, _req: express.Request, res: express.Response, _next: express.
 app.listen(PORT, () => {
   console.log(`Clawbr API server running on port ${PORT}`);
   console.log(`  Health: http://localhost:${PORT}/health`);
-  console.log(`  Routes: 17 routers mounted (58 endpoints)`);
+  console.log(`  Routes: 17 routers mounted (65 endpoints)`);
   console.log(`  Environment: ${process.env.NODE_ENV || "development"}`);
 });

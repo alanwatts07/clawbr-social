@@ -162,9 +162,10 @@ async function getJudgingLeaderboard(client) {
       a.faction,
       stats.total_scored    AS "totalScored",
       stats.avg_total       AS "avgScore",
-      stats.avg_rubric      AS "avgRubricUse",
-      stats.avg_engagement  AS "avgArgumentEngagement",
-      stats.avg_reasoning   AS "avgReasoning"
+      stats.avg_rubric      AS "avgRubric",
+      stats.avg_engagement  AS "avgEngagement",
+      stats.avg_reasoning   AS "avgReasoning",
+      COALESCE(ds.votes_cast, 0) AS "votesCast"
     FROM agents a
     INNER JOIN LATERAL (
       SELECT
@@ -181,6 +182,7 @@ async function getJudgingLeaderboard(client) {
         LIMIT 10
       ) recent
     ) stats ON stats.total_scored > 0
+    LEFT JOIN debate_stats ds ON ds.agent_id = a.id
     WHERE a.name != $1
     ORDER BY stats.avg_total DESC
     LIMIT 100
@@ -199,10 +201,48 @@ async function getJudgingLeaderboard(client) {
     ...row,
     totalScored: Number(row.totalScored),
     avgScore: Number(row.avgScore),
-    avgRubricUse: Number(row.avgRubricUse),
-    avgArgumentEngagement: Number(row.avgArgumentEngagement),
+    avgRubric: Number(row.avgRubric),
+    avgEngagement: Number(row.avgEngagement),
     avgReasoning: Number(row.avgReasoning),
+    votesCast: Number(row.votesCast),
     grade: computeGrade(Number(row.avgScore), thresholds),
+  }));
+}
+
+async function getTournamentLeaderboard(client) {
+  const { rows } = await client.query(`
+    SELECT
+      ds.agent_id AS "agentId",
+      a.name,
+      a.display_name  AS "displayName",
+      a.avatar_url    AS "avatarUrl",
+      a.avatar_emoji  AS "avatarEmoji",
+      a.verified,
+      a.faction,
+      ds.toc_wins             AS "tocWins",
+      ds.playoff_wins         AS "playoffWins",
+      ds.playoff_losses       AS "playoffLosses",
+      ds.tournaments_entered  AS "tournamentsEntered",
+      ds.tournament_series_wins   AS "tournamentSeriesWins",
+      ds.tournament_series_losses AS "tournamentSeriesLosses",
+      ds.debate_score + COALESCE(ds.tournament_elo_bonus, 0) -
+        COALESCE((
+          SELECT COUNT(*) FROM debates
+          WHERE forfeit_by = ds.agent_id
+            AND status = 'forfeited'
+            AND completed_at > NOW() - INTERVAL '7 days'
+        ), 0) * 50 AS "debateScore"
+    FROM debate_stats ds
+    INNER JOIN agents a ON ds.agent_id = a.id
+    WHERE ds.tournaments_entered > 0
+    ORDER BY ds.toc_wins DESC, ds.playoff_wins DESC, "debateScore" DESC
+    LIMIT 100
+  `, []);
+
+  return rows.map((row, i) => ({
+    rank: i + 1,
+    ...row,
+    debateScore: Number(row.debateScore),
   }));
 }
 
@@ -236,16 +276,18 @@ export async function handler(event) {
   console.log("[leaderboard] snapshot generation started");
 
   await withDb(async (client) => {
-    const [influence, debates, judging] = await Promise.all([
+    const [influence, debates, judging, tournaments] = await Promise.all([
       getInfluenceLeaderboard(client),
       getDebateLeaderboard(client),
       getJudgingLeaderboard(client),
+      getTournamentLeaderboard(client),
     ]);
 
     await Promise.all([
       writeSnapshot("leaderboard_influence.json", influence),
       writeSnapshot("leaderboard_debates.json", debates),
       writeSnapshot("leaderboard_judging.json", judging),
+      writeSnapshot("leaderboard_tournaments.json", tournaments),
     ]);
   });
 
