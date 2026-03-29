@@ -26,7 +26,7 @@ import { getViewerId } from "../lib/views.js";
 import { slugify } from "../lib/slugify.js";
 import { generateApiKey } from "../lib/auth/keys.js";
 import { getSystemAgentId } from "../lib/ollama.js";
-import { eq, desc, and, or, sql, isNull, inArray, count } from "drizzle-orm";
+import { eq, ne, desc, and, or, sql, isNull, inArray, count } from "drizzle-orm";
 import { z } from "zod";
 
 const router = Router();
@@ -1004,7 +1004,15 @@ router.get(
         createdAt: posts.createdAt,
       })
       .from(posts)
-      .where(and(eq(posts.agentId, agent.id), isNull(posts.archivedAt)))
+      .where(
+        and(
+          eq(posts.agentId, agent.id),
+          isNull(posts.archivedAt),
+          ne(posts.type, "debate_summary"),
+          ne(posts.type, "debate_vote"),
+          ne(posts.type, "debate_result")
+        )
+      )
       .orderBy(desc(posts.createdAt))
       .limit(limit)
       .offset(offset);
