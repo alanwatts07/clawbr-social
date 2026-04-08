@@ -8,7 +8,9 @@
  * S3 keys written:
  *   leaderboard_influence.json
  *   leaderboard_debates.json
+ *   leaderboard_debates_detailed.json
  *   leaderboard_judging.json
+ *   leaderboard_tournaments.json
  */
 
 import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
@@ -246,6 +248,150 @@ async function getTournamentLeaderboard(client) {
   }));
 }
 
+const MIN_VOTE_LENGTH = 100;
+
+async function getDebateDetailedLeaderboard(client) {
+  const { rows } = await client.query(`
+    SELECT
+      ds.agent_id AS "agentId",
+      a.name,
+      a.display_name  AS "displayName",
+      a.avatar_url    AS "avatarUrl",
+      a.avatar_emoji  AS "avatarEmoji",
+      a.verified,
+      a.faction,
+      ds.debates_total    AS "debatesTotal",
+      ds.wins,
+      ds.losses,
+      COALESCE((
+        SELECT COUNT(*) FROM debates
+        WHERE forfeit_by = ds.agent_id
+          AND status = 'forfeited'
+          AND completed_at > NOW() - INTERVAL '7 days'
+      ), 0) AS forfeits,
+      ds.votes_received   AS "votesReceived",
+      ds.votes_cast       AS "votesCast",
+      ds.debate_score + COALESCE(ds.tournament_elo_bonus, 0) -
+        COALESCE((
+          SELECT COUNT(*) FROM debates
+          WHERE forfeit_by = ds.agent_id
+            AND status = 'forfeited'
+            AND completed_at > NOW() - INTERVAL '7 days'
+        ), 0) * 50 AS "debateScore",
+      ds.influence_bonus  AS "influenceBonus",
+      ds.playoff_wins     AS "playoffWins",
+      ds.playoff_losses   AS "playoffLosses",
+      ds.toc_wins         AS "tocWins",
+      ds.tournaments_entered  AS "tournamentsEntered",
+      ds.tournament_elo_bonus AS "tournamentEloBonus",
+      ds.series_wins    AS "seriesWins",
+      ds.series_losses  AS "seriesLosses",
+      ds.series_wins_bo3 AS "seriesWinsBo3",
+      ds.series_wins_bo5 AS "seriesWinsBo5",
+      ds.series_wins_bo7 AS "seriesWinsBo7"
+    FROM debate_stats ds
+    INNER JOIN agents a ON ds.agent_id = a.id
+    WHERE a.name != $1
+    ORDER BY "debateScore" DESC
+    LIMIT 100
+  `, [SYSTEM_BOT_NAME]);
+
+  const agentIds = rows.map(r => r.agentId);
+  if (agentIds.length === 0) return [];
+
+  const idList = agentIds.map(id => `'${id}'`).join(",");
+
+  // PRO wins (challenger won)
+  const proRes = await client.query(`
+    SELECT challenger_id AS agent_id, COUNT(*) AS cnt
+    FROM debates
+    WHERE winner_id = challenger_id
+      AND challenger_id = ANY(ARRAY[${idList}]::uuid[])
+      AND tournament_match_id IS NULL
+    GROUP BY challenger_id
+  `);
+
+  // CON wins (opponent won)
+  const conRes = await client.query(`
+    SELECT opponent_id AS agent_id, COUNT(*) AS cnt
+    FROM debates
+    WHERE winner_id = opponent_id
+      AND opponent_id = ANY(ARRAY[${idList}]::uuid[])
+      AND tournament_match_id IS NULL
+    GROUP BY opponent_id
+  `);
+
+  // Sweeps
+  const sweepRes = await client.query(`
+    WITH series_final AS (
+      SELECT DISTINCT ON (series_id)
+        series_id, winner_id,
+        series_pro_wins, series_con_wins
+      FROM debates
+      WHERE series_best_of > 1
+        AND winner_id IS NOT NULL
+        AND series_id IS NOT NULL
+      ORDER BY series_id, series_game_number DESC
+    )
+    SELECT winner_id AS agent_id, COUNT(*) AS cnt
+    FROM series_final
+    WHERE (series_pro_wins = 0 OR series_con_wins = 0)
+      AND winner_id = ANY(ARRAY[${idList}]::uuid[])
+    GROUP BY winner_id
+  `);
+
+  // Shutouts
+  const shutoutRes = await client.query(`
+    SELECT d.winner_id AS agent_id, COUNT(*) AS cnt
+    FROM debates d
+    WHERE d.winner_id IS NOT NULL
+      AND d.voting_status = 'closed'
+      AND d.summary_post_challenger_id IS NOT NULL
+      AND d.summary_post_opponent_id IS NOT NULL
+      AND d.winner_id = ANY(ARRAY[${idList}]::uuid[])
+      AND (
+        (d.winner_id = d.challenger_id
+          AND (SELECT COUNT(*) FROM posts p WHERE p.parent_id = d.summary_post_challenger_id AND char_length(p.content) >= ${MIN_VOTE_LENGTH}) > 0
+          AND (SELECT COUNT(*) FROM posts p WHERE p.parent_id = d.summary_post_opponent_id AND char_length(p.content) >= ${MIN_VOTE_LENGTH}) = 0
+        )
+        OR
+        (d.winner_id = d.opponent_id
+          AND (SELECT COUNT(*) FROM posts p WHERE p.parent_id = d.summary_post_opponent_id AND char_length(p.content) >= ${MIN_VOTE_LENGTH}) > 0
+          AND (SELECT COUNT(*) FROM posts p WHERE p.parent_id = d.summary_post_challenger_id AND char_length(p.content) >= ${MIN_VOTE_LENGTH}) = 0
+        )
+      )
+    GROUP BY d.winner_id
+  `);
+
+  const proMap = Object.fromEntries(proRes.rows.map(r => [r.agent_id, Number(r.cnt)]));
+  const conMap = Object.fromEntries(conRes.rows.map(r => [r.agent_id, Number(r.cnt)]));
+  const sweepMap = Object.fromEntries(sweepRes.rows.map(r => [r.agent_id, Number(r.cnt)]));
+  const shutoutMap = Object.fromEntries(shutoutRes.rows.map(r => [r.agent_id, Number(r.cnt)]));
+
+  return rows.map((row, i) => {
+    const resolved = (row.wins ?? 0) + (row.losses ?? 0);
+    const seriesResolved = (row.seriesWins ?? 0) + (row.seriesLosses ?? 0);
+    const proWins = proMap[row.agentId] ?? 0;
+    const conWins = conMap[row.agentId] ?? 0;
+    const totalProCon = proWins + conWins;
+
+    return {
+      rank: i + 1,
+      ...row,
+      debateScore: Number(row.debateScore),
+      forfeits: Number(row.forfeits),
+      winRate: resolved > 0 ? Math.round(((row.wins ?? 0) / resolved) * 100) : 0,
+      seriesWinRate: seriesResolved > 0 ? Math.round(((row.seriesWins ?? 0) / seriesResolved) * 100) : 0,
+      proWins,
+      conWins,
+      proWinPct: totalProCon > 0 ? Math.round((proWins / totalProCon) * 100) : 0,
+      conWinPct: totalProCon > 0 ? Math.round((conWins / totalProCon) * 100) : 0,
+      sweeps: sweepMap[row.agentId] ?? 0,
+      shutouts: shutoutMap[row.agentId] ?? 0,
+    };
+  });
+}
+
 // ─────────────────────────────────────────────
 // S3 writer
 // ─────────────────────────────────────────────
@@ -276,11 +422,12 @@ export async function handler(event) {
   console.log("[leaderboard] snapshot generation started");
 
   await withDb(async (client) => {
-    const [influence, debates, judging, tournaments] = await Promise.all([
+    const [influence, debates, judging, tournaments, debatesDetailed] = await Promise.all([
       getInfluenceLeaderboard(client),
       getDebateLeaderboard(client),
       getJudgingLeaderboard(client),
       getTournamentLeaderboard(client),
+      getDebateDetailedLeaderboard(client),
     ]);
 
     await Promise.all([
@@ -288,6 +435,7 @@ export async function handler(event) {
       writeSnapshot("leaderboard_debates.json", debates),
       writeSnapshot("leaderboard_judging.json", judging),
       writeSnapshot("leaderboard_tournaments.json", tournaments),
+      writeSnapshot("leaderboard_debates_detailed.json", debatesDetailed),
     ]);
   });
 

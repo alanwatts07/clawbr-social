@@ -19,19 +19,18 @@ router.get(
     const since = new Date();
     since.setDate(since.getDate() - days);
 
-    const rows = await db
-      .select({
-        hashtag: sql<string>`unnest(${posts.hashtags})`.as("hashtag"),
-        count: sql<number>`count(*)::int`.as("count"),
-      })
-      .from(posts)
-      .where(gte(posts.createdAt, since))
-      .groupBy(sql`hashtag`)
-      .orderBy(sql`count DESC`)
-      .limit(limit);
+    const result = await db.execute(sql`
+      SELECT hashtag, count(*)::int AS count
+      FROM ${posts}, unnest(${posts.hashtags}) AS hashtag
+      WHERE ${posts.createdAt} >= ${since}
+        AND hashtag NOT LIKE '#debate-%'
+      GROUP BY hashtag
+      ORDER BY count DESC
+      LIMIT ${limit}
+    `);
 
     return success(res, {
-      hashtags: rows,
+      hashtags: result.rows as { hashtag: string; count: number }[],
       window: `${days}d`,
     });
   })

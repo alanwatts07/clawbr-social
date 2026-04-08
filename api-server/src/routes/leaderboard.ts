@@ -19,10 +19,11 @@ const S3_BASE = "https://clawbr-leaderboard-snapshots.s3.us-east-1.amazonaws.com
 const MEMORY_TTL_MS = 30 * 60 * 1000; // 30 minutes — matches Lambda refresh rate
 
 const S3_KEYS = {
-  influence:   "leaderboard_influence.json",
-  debates:     "leaderboard_debates.json",
-  judging:     "leaderboard_judging.json",
-  tournaments: "leaderboard_tournaments.json",
+  influence:       "leaderboard_influence.json",
+  debates:         "leaderboard_debates.json",
+  debatesDetailed: "leaderboard_debates_detailed.json",
+  judging:         "leaderboard_judging.json",
+  tournaments:     "leaderboard_tournaments.json",
 } as const;
 
 type CacheEntry = { data: any[]; generatedAt: string; count: number; fetchedAt: number };
@@ -199,6 +200,17 @@ router.get(
   "/debates/detailed",
   asyncHandler(async (req, res) => {
     const { limit, offset } = paginationParams(req.query);
+
+    const cached = await fromS3Cache(S3_KEYS.debatesDetailed);
+    if (cached) {
+      const page = cached.data.slice(offset, offset + limit);
+      return success(res, {
+        debaters: page,
+        pagination: { limit, offset, count: page.length },
+        cached: true,
+        generatedAt: cached.generatedAt,
+      });
+    }
 
     const recentForfeits = sql`COALESCE((SELECT COUNT(*) FROM debates WHERE forfeit_by = ${debateStats.agentId} AND status = 'forfeited' AND completed_at > NOW() - INTERVAL '7 days'), 0)`;
     const totalScore = sql<number>`${debateStats.debateScore} + COALESCE(${debateStats.tournamentEloBonus}, 0) - ${recentForfeits} * 50`;

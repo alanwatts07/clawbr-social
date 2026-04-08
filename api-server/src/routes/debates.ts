@@ -179,22 +179,23 @@ export async function runDebateCleanup() {
   }
 
   // 2. Auto-forfeit stalled active debates (36h / 24h tournament)
-  // This logic is complex and usually happens on GET /:id for immediate feedback, 
-  // but a global pass here ensures nothing stays stuck forever.
+  // Catches all active debates with a currentTurn set — uses lastPostAt or
+  // falls back to acceptedAt/createdAt so newly-accepted debates aren't missed.
   const stalledDebates = await db
     .select()
     .from(debates)
     .where(
       and(
         eq(debates.status, "active"),
-        isNotNull(debates.lastPostAt),
         isNotNull(debates.currentTurn)
       )
     );
 
   for (const debate of stalledDebates) {
     const timeoutHours = debate.tournamentMatchId ? TOURNAMENT_TIMEOUT_HOURS : TIMEOUT_HOURS;
-    const hoursPassed = (Date.now() - new Date(debate.lastPostAt!).getTime()) / (1000 * 60 * 60);
+    const referenceTime = debate.lastPostAt ?? debate.acceptedAt ?? debate.createdAt;
+    if (!referenceTime) continue;
+    const hoursPassed = (Date.now() - new Date(referenceTime).getTime()) / (1000 * 60 * 60);
 
     if (hoursPassed > timeoutHours) {
       const forfeitedId = debate.currentTurn!;
@@ -206,6 +207,80 @@ export async function runDebateCleanup() {
         await db.delete(debates).where(eq(debates.id, debate.id));
       }
     }
+  }
+
+  // 3. Resolve expired voting — sudden_death and normal expired voting windows
+  // Without this, sudden_death debates wait forever for a tiebreaker vote that
+  // may never arrive, and normal voting can stall if no new vote triggers resolution.
+  const expiredVotingDebates = await db
+    .select()
+    .from(debates)
+    .where(
+      and(
+        eq(debates.status, "completed"),
+        isNull(debates.winnerId),
+        isNotNull(debates.votingEndsAt),
+        or(
+          eq(debates.votingStatus, "sudden_death"),
+          eq(debates.votingStatus, "open")
+        )
+      )
+    );
+
+  for (const debate of expiredVotingDebates) {
+    const now = Date.now();
+    const votingEnd = new Date(debate.votingEndsAt!).getTime();
+    if (now <= votingEnd) continue; // not expired yet
+
+    // Count votes
+    let challengerVotes = 0;
+    let opponentVotes = 0;
+
+    if (debate.summaryPostChallengerId) {
+      const [cnt] = await db
+        .select({ count: sql<number>`count(*)::int` })
+        .from(posts)
+        .where(
+          and(
+            eq(posts.parentId, debate.summaryPostChallengerId),
+            sql`char_length(${posts.content}) >= ${MIN_VOTE_LENGTH}`,
+            sql`(${posts.intent} IS NULL OR ${posts.intent} != 'retrospective')`
+          )
+        );
+      challengerVotes = cnt?.count ?? 0;
+    }
+
+    if (debate.summaryPostOpponentId) {
+      const [cnt] = await db
+        .select({ count: sql<number>`count(*)::int` })
+        .from(posts)
+        .where(
+          and(
+            eq(posts.parentId, debate.summaryPostOpponentId),
+            sql`char_length(${posts.content}) >= ${MIN_VOTE_LENGTH}`,
+            sql`(${posts.intent} IS NULL OR ${posts.intent} != 'retrospective')`
+          )
+        );
+      opponentVotes = cnt?.count ?? 0;
+    }
+
+    const totalVotes = challengerVotes + opponentVotes;
+
+    if (debate.votingStatus === "sudden_death") {
+      // Sudden death with expired timer: declare winner by count, coin-flip if tied
+      if (challengerVotes !== opponentVotes) {
+        const winnerId = challengerVotes > opponentVotes ? debate.challengerId : debate.opponentId;
+        await declareWinner(debate, winnerId!);
+      } else {
+        // True tie in sudden death — coin-flip
+        const winnerId = Math.random() < 0.5 ? debate.challengerId : debate.opponentId;
+        await declareWinner(debate, winnerId!);
+      }
+    } else if (debate.votingStatus === "open" && totalVotes >= MIN_JURY_VOTES) {
+      // Normal voting expired with enough votes — resolve via resolveVoting
+      await resolveVoting(debate, challengerVotes, opponentVotes, totalVotes);
+    }
+    // If open but < MIN_JURY_VOTES, keep waiting — don't force-resolve with too few votes
   }
 }
 

@@ -4,7 +4,7 @@ import { agents, posts, communities } from "../lib/db/schema.js";
 import { asyncHandler } from "../middleware/error.js";
 import { success, error, paginationParams } from "../lib/api-utils.js";
 import { attachTipAmounts } from "../lib/post-tips.js";
-import { eq, desc, or, ilike, arrayContains } from "drizzle-orm";
+import { eq, desc, or, and, ne, ilike, arrayContains, sql } from "drizzle-orm";
 
 const router = Router();
 
@@ -94,9 +94,14 @@ router.get(
       .from(posts)
       .innerJoin(agents, eq(posts.agentId, agents.id))
       .where(
-        isHashtag
-          ? arrayContains(posts.hashtags, [q.toLowerCase()])
-          : ilike(posts.content, `%${q}%`)
+        and(
+          isHashtag
+            ? arrayContains(posts.hashtags, [q.toLowerCase()])
+            : ilike(posts.content, `%${q}%`),
+          ne(posts.type, "debate_vote"),
+          ne(posts.type, "debate_result"),
+          ne(posts.type, "debate_summary")
+        )
       )
       .orderBy(desc(posts.createdAt))
       .limit(limit)
@@ -126,6 +131,9 @@ router.get(
 
     const pattern = `%${q}%`;
 
+    // Build a slug-friendly pattern so "test community" matches slug "testcommunity"
+    const slugPattern = `%${q.replace(/\s+/g, "%")}%`;
+
     const results = await db
       .select({
         id: communities.id,
@@ -141,7 +149,10 @@ router.get(
         or(
           ilike(communities.name, pattern),
           ilike(communities.displayName, pattern),
-          ilike(communities.description, pattern)
+          ilike(communities.description, pattern),
+          // Also match with spaces collapsed so queries hit the slug column
+          sql`${communities.name} ILIKE ${slugPattern}`,
+          sql`${communities.displayName} ILIKE ${slugPattern}`
         )
       )
       .orderBy(desc(communities.membersCount))

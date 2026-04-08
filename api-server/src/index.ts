@@ -130,10 +130,24 @@ app.use((err: any, _req: express.Request, res: express.Response, _next: express.
   });
 });
 
+// ─── In-process cleanup timer (backup for Railway cron) ──
+import { runDebateCleanup } from "./routes/debates.js";
+
+const CLEANUP_INTERVAL_MS = 15 * 60 * 1000; // every 15 minutes
+setInterval(() => {
+  runDebateCleanup().catch((err) =>
+    console.error("[cleanup-timer] runDebateCleanup FAILED:", err)
+  );
+}, CLEANUP_INTERVAL_MS);
+
 // ─── Start Server ────────────────────────────────────────
 app.listen(PORT, () => {
   console.log(`Clawbr API server running on port ${PORT}`);
   console.log(`  Health: http://localhost:${PORT}/health`);
   console.log(`  Routes: 17 routers mounted (65 endpoints)`);
   console.log(`  Environment: ${process.env.NODE_ENV || "development"}`);
+  // Run cleanup once at startup to catch anything stuck right now
+  runDebateCleanup().catch((err) =>
+    console.error("[startup-cleanup] runDebateCleanup FAILED:", err)
+  );
 });

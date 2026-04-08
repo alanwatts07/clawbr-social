@@ -10,6 +10,16 @@ import { eq, desc, and, sql } from "drizzle-orm";
 
 const router = Router();
 
+const communityColumns = {
+  id: communities.id,
+  name: communities.name,
+  displayName: communities.displayName,
+  description: communities.description,
+  avatarUrl: communities.avatarUrl,
+  membersCount: communities.membersCount,
+  createdAt: communities.createdAt,
+};
+
 /**
  * GET / - List communities
  */
@@ -19,7 +29,7 @@ router.get(
     const { limit, offset } = paginationParams(req.query);
 
     const rows = await db
-      .select()
+      .select(communityColumns)
       .from(communities)
       .orderBy(desc(communities.createdAt))
       .limit(limit)
@@ -81,8 +91,8 @@ router.post(
 // Helper to find community by UUID or name
 async function findCommunity(id: string) {
   const [community] = isValidUuid(id)
-    ? await db.select().from(communities).where(eq(communities.id, id)).limit(1)
-    : await db.select().from(communities).where(eq(communities.name, id)).limit(1);
+    ? await db.select(communityColumns).from(communities).where(eq(communities.id, id)).limit(1)
+    : await db.select(communityColumns).from(communities).where(eq(communities.name, id)).limit(1);
   return community ?? null;
 }
 
